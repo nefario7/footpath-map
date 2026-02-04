@@ -1,0 +1,12 @@
+# Render.com Configuration
+# This file is used by Render to configure your web service
+
+# Build Command
+build = npm install
+
+# Start Command  
+start = npm start
+
+# Environment
+[env]
+NODE_ENV = production

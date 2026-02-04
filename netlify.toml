@@ -1,0 +1,18 @@
+# Netlify Configuration
+[build]
+  publish = "public"
+  command = "echo 'No build needed for static site'"
+
+[[redirects]]
+  from = "/api/*"
+  to = "https://your-render-backend-url.onrender.com/api/:splat"
+  status = 200
+  force = true
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-XSS-Protection = "1; mode=block"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
