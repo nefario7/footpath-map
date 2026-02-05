@@ -16,7 +16,7 @@ class AiAnalysisService {
 
         // Rate limiting configuration
         this.lastCallTime = 0;
-        this.minInterval = 2000; // 2 seconds between calls
+        this.minInterval = 5000; // 5 seconds between calls (Free tier: 15 RPM safe margin)
         this.maxRetries = 3;
     }
 
@@ -90,7 +90,7 @@ class AiAnalysisService {
 
         } catch (error) {
             if ((error.message.includes('429') || error.message.includes('quota')) && retryCount < this.maxRetries) {
-                const waitTime = (retryCount + 1) * 5000;
+                const waitTime = (retryCount + 1) * 10000; // Agile backoff: 10s, 20s, 30s
                 console.log(`AiService Rate Limit. Retrying in ${waitTime}ms...`);
                 await new Promise(r => setTimeout(r, waitTime));
                 return this.analyzeTweet(tweetText, retryCount + 1);

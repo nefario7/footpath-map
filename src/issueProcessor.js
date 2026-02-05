@@ -23,11 +23,11 @@ class IssueProcessor {
 
         try {
             // 1. Get pending posts
-            // Process in small batches to respect rate limits
-            const pendingPosts = await db.getPendingPosts(5);
+            // Process in small batches (2) to respect rate limits and allow delays
+            const pendingPosts = await db.getPendingPosts(2);
 
             if (pendingPosts.length === 0) {
-                console.log('✅ No pending posts to process.');
+                // console.log('✅ No pending posts to process.');
                 this.isProcessing = false;
                 return;
             }
@@ -36,6 +36,8 @@ class IssueProcessor {
 
             for (const post of pendingPosts) {
                 await this.processPost(post);
+                // Wait 5 seconds between items to respect API limits (15 RPM)
+                await new Promise(r => setTimeout(r, 5000));
             }
 
         } catch (error) {
