@@ -28,7 +28,7 @@ function escapeHtml(text) {
 /**
  * Create a post card element
  */
-function createPostCard(post, hasCoordspost) {
+function createPostCard(post, hasCoords) {
     const card = document.createElement('div');
     card.className = 'post-card';
     
