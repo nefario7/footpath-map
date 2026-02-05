@@ -4,6 +4,7 @@ import axios from 'axios';
 import { Map as MapIcon, Mic, List, RefreshCw } from 'lucide-react';
 import Map from './components/Map';
 import PostList from './components/PostList';
+import ProcessingStatus from './components/ProcessingStatus';
 import FeedPage from './pages/FeedPage';
 
 // Home Page (Map View) - Only shows Processed Issues
@@ -129,6 +130,9 @@ function App() {
             </NavLink>
           </div>
         </header>
+
+        {/* Processing Status Banner */}
+        <ProcessingStatus />
 
         {/* Main Content Area */}
         <main className="flex-1 overflow-hidden relative flex flex-col">

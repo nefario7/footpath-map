@@ -266,6 +266,41 @@ function formatPost(row) {
     };
 }
 
+/**
+ * Get processing statistics for status API
+ */
+async function getProcessingStats() {
+    const res = await pool.query(`
+        SELECT 
+            processing_status,
+            COUNT(*) as count
+        FROM posts 
+        GROUP BY processing_status
+    `);
+
+    const stats = {
+        pending: 0,
+        processed_no_issue: 0,
+        processed_mapped: 0,
+        total: 0
+    };
+
+    for (const row of res.rows) {
+        const status = row.processing_status || 'pending';
+        const count = parseInt(row.count);
+        stats[status] = count;
+        stats.total += count;
+    }
+
+    // Calculate progress percentage
+    const processed = stats.processed_no_issue + stats.processed_mapped;
+    stats.progressPercent = stats.total > 0
+        ? Math.round((processed / stats.total) * 100)
+        : 100;
+
+    return stats;
+}
+
 module.exports = {
     pool,
     initDB,
@@ -275,5 +310,6 @@ module.exports = {
     getAllPosts,
     getLatestTweetId,
     getPendingPosts,
-    markPostAsProcessed
+    markPostAsProcessed,
+    getProcessingStats
 };

@@ -52,14 +52,16 @@ async function runIngestion() {
 
 /**
  * Job 2: Processing (Pending Tweets -> AI -> Map)
+ * Using a global instance to track state across calls
  */
+const issueProcessor = new IssueProcessor();
+
 async function runProcessing() {
   try {
-    // console.log('⚙️  Starting Processing Job...');
-    const processor = new IssueProcessor();
-    await processor.processQueue();
+    return await issueProcessor.processQueue();
   } catch (error) {
     console.error('❌ Processing Error:', error.message);
+    return { error: error.message };
   }
 }
 
@@ -129,16 +131,27 @@ app.post('/api/process', async (req, res) => {
 
 /**
  * GET /api/status
+ * Returns overall system status including processing progress
  */
 app.get('/api/status', async (req, res) => {
   try {
     const data = await db.getAllPosts();
+    const processingStats = await db.getProcessingStats();
+    const processorStatus = issueProcessor.getStatus();
+
     res.json({
       status: 'online',
       lastUpdated: new Date(),
       totalPosts: data.totalPosts,
       postsWithCoords: data.postsWithCoords,
-      postsMissingCoords: data.postsMissingCoords
+      postsMissingCoords: data.postsMissingCoords,
+      processing: {
+        ...processingStats,
+        isProcessing: processorStatus.isProcessing,
+        lastCycleTime: processorStatus.lastCycleTime,
+        aiQuotaExhausted: processorStatus.aiStatus.quotaExhausted,
+        aiQuotaResetMinutes: processorStatus.aiStatus.minutesUntilReset
+      }
     });
   } catch (error) {
     res.status(500).json({ status: 'error', message: error.message });
@@ -147,16 +160,47 @@ app.get('/api/status', async (req, res) => {
 
 // --- Schedulers ---
 
-// 1. Ingestion: Every 2 days at 2 AM (or more frequent if API allowance permits)
+// 1. Ingestion: Every 2 days at 2 AM
 cron.schedule('0 2 */2 * *', async () => {
   await runIngestion();
 });
 
-// 2. Processing: Every 15 minutes
-// Checks for pending posts and processes them
-cron.schedule('*/15 * * * *', async () => {
-  await runProcessing();
-});
+// 2. Continuous Processing Loop
+// Processes pending tweets automatically with delays between batches
+let processingLoopRunning = false;
+
+async function startContinuousProcessing() {
+  if (processingLoopRunning) return;
+  processingLoopRunning = true;
+
+  console.log('🔄 Starting continuous processing loop...');
+
+  while (processingLoopRunning) {
+    const result = await runProcessing();
+
+    // If quota exhausted, wait until reset
+    if (result?.skipped && result?.reason === 'quota_exhausted') {
+      const waitMs = Math.max((result.minutesUntilReset || 60) * 60 * 1000, 60000);
+      console.log(`⏸️  Pausing processing for ${Math.round(waitMs / 60000)} minutes due to quota...`);
+      await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+
+    // If nothing to process, check again in 5 minutes
+    if (result?.reason === 'no_pending') {
+      console.log('✅ All caught up! Checking again in 5 minutes...');
+      await new Promise(r => setTimeout(r, 5 * 60 * 1000));
+      continue;
+    }
+
+    // Normal processing - wait 10 seconds between batches to be nice to APIs
+    await new Promise(r => setTimeout(r, 10000));
+  }
+}
+
+function stopProcessingLoop() {
+  processingLoopRunning = false;
+}
 
 
 // The "catchall" handler
@@ -172,8 +216,11 @@ const startServer = async () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
     });
 
-    // Initial run on startup (optional, good for dev)
-    // runProcessing(); 
+    // Start continuous processing after server is up
+    setTimeout(() => {
+      startContinuousProcessing();
+    }, 3000);
+
   } catch (error) {
     console.error('Fatal error starting server:', error);
   }
