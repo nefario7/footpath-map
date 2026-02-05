@@ -1,97 +1,85 @@
 const TwitterService = require('../src/twitterService');
-const fs = require('fs');
-const path = require('path');
+const db = require('../src/db');
+const { getAllPosts, savePosts } = require('../src/db');
+require('dotenv').config();
 
 /**
  * Reprocess existing tweet data with updated parsing logic
- * No Twitter API calls - just re-parses what we already have in posts.json
+ * Reads from DB, re-parses text, and updates DB
  */
-function reprocessExistingData() {
-  const dataPath = path.join(__dirname, '../data/posts.json');
-  
-  // Check if data file exists
-  if (!fs.existsSync(dataPath)) {
-    console.error('❌ No data file found at data/posts.json');
-    console.log('Run "npm run fetch" first to download tweets');
-    process.exit(1);
-  }
-  
-  // Read existing data
-  console.log('📂 Reading existing data...');
-  const existingData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
-  
-  // Reconstruct all tweets from both arrays (they have all the original data)
-  const allTweets = [
-    ...existingData.posts.withCoords,
-    ...existingData.posts.missingCoords
-  ];
-  
-  console.log(`📊 Found ${allTweets.length} total tweets to reprocess`);
-  console.log(`   Previous: ${existingData.postsWithCoords} with coords, ${existingData.postsMissingCoords} without`);
-  
-  // Reprocess with new parsing logic
-  console.log('🔄 Re-parsing coordinates...');
-  const twitterService = new TwitterService();
-  const withCoords = [];
-  const missingCoords = [];
-  
-  for (const tweet of allTweets) {
-    const coords = twitterService.parseCoordinates(tweet.text);
-    
-    const processedTweet = {
-      id: tweet.id,
-      text: tweet.text,
-      createdAt: tweet.createdAt,
-      url: tweet.url || `https://twitter.com/caleb_friesen/status/${tweet.id}`,
-      mediaUrls: tweet.mediaUrls || []
-    };
-    
-    if (coords) {
-      withCoords.push({
-        ...processedTweet,
-        coordinates: coords
-      });
-    } else {
-      missingCoords.push(processedTweet);
+async function reprocessExistingData() {
+  try {
+    await db.initDB();
+    console.log('📂 Reading existing data from database...');
+
+    const dbData = await getAllPosts();
+    const allTweets = [
+      ...dbData.posts.withCoords,
+      ...dbData.posts.missingCoords
+    ];
+
+    if (allTweets.length === 0) {
+      console.log('⚠️ No tweets found in database.');
+      process.exit(0);
     }
-  }
-  
-  console.log(`\n✅ Reprocessing complete!`);
-  console.log(`   New: ${withCoords.length} with coords, ${missingCoords.length} without`);
-  
-  if (withCoords.length > existingData.postsWithCoords) {
-    console.log(`   🎉 Found ${withCoords.length - existingData.postsWithCoords} additional tweets with coordinates!`);
-  } else if (withCoords.length === existingData.postsWithCoords) {
-    console.log(`   ℹ️  No additional coordinates found with new patterns`);
-  }
-  
-  // Save updated data
-  const updatedData = {
-    lastUpdated: new Date().toISOString(),
-    totalPosts: allTweets.length,
-    postsWithCoords: withCoords.length,
-    postsMissingCoords: missingCoords.length,
-    posts: { withCoords, missingCoords }
-  };
-  
-  fs.writeFileSync(dataPath, JSON.stringify(updatedData, null, 2));
-  console.log(`\n💾 Data saved to ${dataPath}`);
-  
-  // Show some examples of found coordinates
-  if (withCoords.length > 0) {
-    console.log(`\n📍 Sample coordinates:`);
-    withCoords.slice(0, 3).forEach((tweet, i) => {
-      console.log(`\n${i + 1}. Tweet ID: ${tweet.id}`);
-      console.log(`   Coords: ${tweet.coordinates.lat}, ${tweet.coordinates.lon}`);
-      console.log(`   Text: ${tweet.text.substring(0, 80)}...`);
-    });
+
+    console.log(`📊 Found ${allTweets.length} total tweets to reprocess`);
+    console.log(`   Current: ${dbData.postsWithCoords} with coords, ${dbData.postsMissingCoords} without`);
+
+    // Reprocess with new parsing logic
+    console.log('🔄 Re-parsing coordinates...');
+    const twitterService = new TwitterService();
+    const withCoords = [];
+    const missingCoords = [];
+
+    for (const tweet of allTweets) {
+      // Re-run parseCoordinates on the text
+      const coords = twitterService.parseCoordinates(tweet.text);
+
+      const processedTweet = {
+        id: tweet.id,
+        text: tweet.text,
+        createdAt: tweet.createdAt,
+        url: tweet.url,
+        mediaUrls: tweet.mediaUrls || [],
+        extractedLocation: tweet.extractedLocation // Preserve existing extraction
+      };
+
+      if (coords) {
+        // If we found coords (maybe new regex pattern?), update it
+        // Note: This might overwrite existing 'geocoded' source with 'regex' 
+        // but usually regex is more accurate if present.
+        withCoords.push({
+          ...processedTweet,
+          coordinates: { ...coords, source: 'regex' }
+        });
+      } else {
+        // Preserve existing coordinates if they were geocoded and we didn't find new regex ones
+        if (tweet.coordinates && tweet.coordinates.source === 'geocoded') {
+          withCoords.push({
+            ...processedTweet,
+            coordinates: tweet.coordinates
+          });
+        } else {
+          missingCoords.push(processedTweet);
+        }
+      }
+    }
+
+    console.log(`\n✅ Reprocessing complete!`);
+    console.log(`   New State: ${withCoords.length} with coords, ${missingCoords.length} without`);
+
+    // Save updated data
+    const allProcessed = [...withCoords, ...missingCoords];
+    const savedCount = await savePosts(allProcessed);
+
+    console.log(`✅ Updated ${savedCount} posts in database`);
+    process.exit(0);
+
+  } catch (error) {
+    console.error('❌ Error reprocessing data:', error);
+    process.exit(1);
   }
 }
 
-// Run the script
-try {
-  reprocessExistingData();
-} catch (error) {
-  console.error('❌ Error reprocessing data:', error.message);
-  process.exit(1);
-}
+reprocessExistingData();

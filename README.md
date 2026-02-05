@@ -64,7 +64,7 @@ npm run fetch
 
 - **Backend**: Node.js, Express, twitter-api-v2
 - **Frontend**: HTML, CSS, JavaScript, Leaflet.js (OpenStreetMap)
-- **Data**: JSON file storage
+- **Data**: PostgreSQL (Supabase/Neon/Render)
 
 ## License
 

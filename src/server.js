@@ -1,9 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
-const fs = require('fs');
-const path = require('path');
 const TwitterService = require('./twitterService');
+const db = require('./db');
 require('dotenv').config();
 
 const app = express();
@@ -16,61 +15,42 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static('public'));
 
-// Data file path
-const DATA_FILE = path.join(__dirname, '../data/posts.json');
-
 /**
  * Fetch and update tweets data
  */
 async function updateTweetsData() {
   try {
     console.log('🔄 Updating tweets data...');
-    
+
+    // Initialize DB if needed (failsafe)
+    await db.initDB();
+
     const twitterService = new TwitterService();
-    const tweetsData = await twitterService.fetchRecentTweets();
-    const processedData = twitterService.processTweets(tweetsData);
-    
-    // Ensure data directory exists
-    const dataDir = path.dirname(DATA_FILE);
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
+
+    // Get latest ID to fetch only new tweets
+    const sinceId = await db.getLatestTweetId();
+    console.log(`   Latest tweet ID in DB: ${sinceId || 'None (Initial fetch)'}`);
+
+    const tweetsData = await twitterService.fetchRecentTweets(sinceId);
+
+    if (tweetsData.tweets.length === 0) {
+      console.log('No new tweets to process.');
+      return await db.getAllPosts();
     }
-    
-    // Save data
-    const dataToSave = {
-      lastUpdated: new Date().toISOString(),
-      totalPosts: processedData.withCoords.length + processedData.missingCoords.length,
-      postsWithCoords: processedData.withCoords.length,
-      postsMissingCoords: processedData.missingCoords.length,
-      posts: processedData
-    };
-    
-    fs.writeFileSync(DATA_FILE, JSON.stringify(dataToSave, null, 2));
-    console.log('✅ Tweets data updated successfully');
-    
-    return dataToSave;
+
+    const processedData = await twitterService.processTweets(tweetsData);
+
+    // Save to DB
+    const allPosts = [...processedData.withCoords, ...processedData.missingCoords];
+    const savedCount = await db.savePosts(allPosts);
+
+    console.log(`✅ Saved ${savedCount} new/updated posts to database`);
+
+    return await db.getAllPosts();
   } catch (error) {
     console.error('❌ Error updating tweets:', error.message);
     throw error;
   }
-}
-
-/**
- * Read posts data from file
- */
-function readPostsData() {
-  if (!fs.existsSync(DATA_FILE)) {
-    return {
-      lastUpdated: null,
-      totalPosts: 0,
-      postsWithCoords: 0,
-      postsMissingCoords: 0,
-      posts: { withCoords: [], missingCoords: [] }
-    };
-  }
-  
-  const data = fs.readFileSync(DATA_FILE, 'utf8');
-  return JSON.parse(data);
 }
 
 // API Routes
@@ -79,13 +59,13 @@ function readPostsData() {
  * GET /api/locations
  * Returns all posts with coordinates for map display
  */
-app.get('/api/locations', (req, res) => {
+app.get('/api/locations', async (req, res) => {
   try {
-    const data = readPostsData();
+    const locations = await db.getLocations();
     res.json({
-      lastUpdated: data.lastUpdated,
-      count: data.postsWithCoords,
-      locations: data.posts.withCoords
+      lastUpdated: new Date(), // Real-time
+      count: locations.length,
+      locations: locations
     });
   } catch (error) {
     console.error('Error reading locations:', error);
@@ -97,15 +77,12 @@ app.get('/api/locations', (req, res) => {
  * GET /api/posts
  * Returns all posts (with and without coordinates)
  */
-app.get('/api/posts', (req, res) => {
+app.get('/api/posts', async (req, res) => {
   try {
-    const data = readPostsData();
+    const data = await db.getAllPosts();
     res.json({
-      lastUpdated: data.lastUpdated,
-      totalPosts: data.totalPosts,
-      postsWithCoords: data.postsWithCoords,
-      postsMissingCoords: data.postsMissingCoords,
-      posts: data.posts
+      lastUpdated: new Date(),
+      ...data
     });
   } catch (error) {
     console.error('Error reading posts:', error);
@@ -119,12 +96,14 @@ app.get('/api/posts', (req, res) => {
  */
 app.post('/api/refresh', async (req, res) => {
   try {
-    const data = await updateTweetsData();
+    await updateTweetsData();
+    const data = await db.getAllPosts();
+
     res.json({
       success: true,
       message: 'Data refreshed successfully',
       data: {
-        lastUpdated: data.lastUpdated,
+        lastUpdated: new Date(),
         totalPosts: data.totalPosts,
         postsWithCoords: data.postsWithCoords,
         postsMissingCoords: data.postsMissingCoords
@@ -143,15 +122,19 @@ app.post('/api/refresh', async (req, res) => {
  * GET /api/status
  * Returns server status and last update time
  */
-app.get('/api/status', (req, res) => {
-  const data = readPostsData();
-  res.json({
-    status: 'online',
-    lastUpdated: data.lastUpdated,
-    totalPosts: data.totalPosts,
-    postsWithCoords: data.postsWithCoords,
-    postsMissingCoords: data.postsMissingCoords
-  });
+app.get('/api/status', async (req, res) => {
+  try {
+    const data = await db.getAllPosts();
+    res.json({
+      status: 'online',
+      lastUpdated: new Date(),
+      totalPosts: data.totalPosts,
+      postsWithCoords: data.postsWithCoords,
+      postsMissingCoords: data.postsMissingCoords
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
 });
 
 // Schedule automatic updates every 2 days at 2 AM
@@ -164,19 +147,20 @@ cron.schedule('0 2 */2 * *', async () => {
   }
 });
 
-// Initialize: Fetch data on startup if file doesn't exist
-if (!fs.existsSync(DATA_FILE)) {
-  console.log('📥 No data file found. Fetching initial data...');
-  updateTweetsData().catch(err => {
-    console.error('Failed to fetch initial data:', err.message);
-    console.log('Server will start anyway. Use POST /api/refresh to try again.');
-  });
-}
-
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📍 Map view: http://localhost:${PORT}`);
-  console.log(`📋 Posts list: http://localhost:${PORT}/posts.html`);
-  console.log(`🔄 Next automatic update: every 2 days at 2 AM`);
-});
+const startServer = async () => {
+  try {
+    // Initialize DB connection
+    await db.initDB();
+
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`📍 Map view: http://localhost:${PORT}`);
+      console.log(`📋 Posts list: http://localhost:${PORT}/posts.html`);
+    });
+  } catch (error) {
+    console.error('Fatal error starting server:', error);
+  }
+};
+
+startServer();

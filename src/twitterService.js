@@ -7,12 +7,13 @@ class TwitterService {
   }
 
   /**
-   * Fetch tweets from @caleb_friesen for the last 60 days
+   * Fetch tweets from @caleb_friesen
+   * @param {string} sinceId - Optional: Return results with an ID greater than (that is, more recent than) the specified ID.
    */
-  async fetchRecentTweets() {
+  async fetchRecentTweets(sinceId = null) {
     try {
       const username = 'caleb_friesen';
-      
+
       // Get user ID first
       const user = await this.client.v2.userByUsername(username);
       if (!user.data) {
@@ -20,20 +21,26 @@ class TwitterService {
       }
 
       const userId = user.data.id;
-      
-      // Calculate date 60 days ago
-      const sixtyDaysAgo = new Date();
-      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
-      const startTime = sixtyDaysAgo.toISOString();
 
-      // Fetch tweets with media information
-      const tweets = await this.client.v2.userTimeline(userId, {
+      const options = {
         max_results: 100,
-        start_time: startTime,
         'tweet.fields': ['created_at', 'text', 'attachments'],
         'media.fields': ['url', 'preview_image_url', 'type'],
         expansions: ['attachments.media_keys']
-      });
+      };
+
+      if (sinceId) {
+        console.log(`Fetching tweets since ID: ${sinceId}`);
+        options.since_id = sinceId;
+      } else {
+        // First run: fetch last 60 days
+        const sixtyDaysAgo = new Date();
+        sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+        options.start_time = sixtyDaysAgo.toISOString();
+      }
+
+      // Fetch tweets with media information
+      const tweets = await this.client.v2.userTimeline(userId, options);
 
       const allTweets = [];
       for await (const tweet of tweets) {
@@ -41,7 +48,7 @@ class TwitterService {
       }
 
       console.log(`Fetched ${allTweets.length} tweets from @${username}`);
-      
+
       return {
         tweets: allTweets,
         includes: tweets.includes
@@ -63,16 +70,16 @@ class TwitterService {
   parseCoordinates(text) {
     let lat = null;
     let lon = null;
-    
+
     // Pattern 1: "Coords:" or "Coord:" prefix (case insensitive)
     const coordPrefixRegex = /Coords?:\s*([\d.]+)\s*,\s*([\d.]+)/i;
     let match = text.match(coordPrefixRegex);
-    
+
     if (match) {
       lat = parseFloat(match[1]);
       lon = parseFloat(match[2]);
     }
-    
+
     // Pattern 2: Google Maps URLs
     // Format: maps.google.com/?q=12.944583,77.620572 or google.com/maps/place/@12.944583,77.620572
     if (!lat) {
@@ -83,7 +90,7 @@ class TwitterService {
         lon = parseFloat(match[2]);
       }
     }
-    
+
     // Pattern 3: Coordinates with degree symbols
     // Format: 12.944583°N, 77.620572°E or 12.944583°, 77.620572°
     if (!lat) {
@@ -94,7 +101,7 @@ class TwitterService {
         lon = parseFloat(match[2]);
       }
     }
-    
+
     // Pattern 4: Plain coordinates (two decimal numbers separated by comma)
     // Be more strict to avoid false positives - must have reasonable precision
     if (!lat) {
@@ -105,7 +112,7 @@ class TwitterService {
         lon = parseFloat(match[2]);
       }
     }
-    
+
     // Pattern 5: Location pin emoji followed by coordinates
     if (!lat) {
       const pinRegex = /📍\s*([\d.]+)\s*,\s*([\d.]+)/;
@@ -115,13 +122,13 @@ class TwitterService {
         lon = parseFloat(match[2]);
       }
     }
-    
+
     // Validate coordinates are within Bangalore bounds (approximately)
     // Bangalore: lat 12.7-13.3, lon 77.3-77.9
     if (lat && lon && lat >= 12.7 && lat <= 13.3 && lon >= 77.3 && lon <= 77.9) {
       return { lat, lon };
     }
-    
+
     return null;
   }
 
@@ -150,16 +157,20 @@ class TwitterService {
 
   /**
    * Process tweets and categorize by coordinate availability
+   * Can optionally use enhanced extraction with LLM + Geocoding
    */
-  processTweets(tweetsData) {
+  async processTweets(tweetsData, useEnhancedExtraction = false) {
     const { tweets, includes } = tweetsData;
     const withCoords = [];
     const missingCoords = [];
 
+    // First pass: Use regex patterns
+    const needsEnhancement = [];
+
     for (const tweet of tweets) {
       const coords = this.parseCoordinates(tweet.text);
       const mediaUrls = this.getMediaUrls(tweet, includes);
-      
+
       const processedTweet = {
         id: tweet.id,
         text: tweet.text,
@@ -171,14 +182,66 @@ class TwitterService {
       if (coords) {
         withCoords.push({
           ...processedTweet,
-          coordinates: coords
+          coordinates: { ...coords, source: 'regex' }
         });
       } else {
         missingCoords.push(processedTweet);
+        // Only add to enhancement queue if not marked to skip
+        if (!tweet.skipProcessing) {
+          needsEnhancement.push(processedTweet);
+        }
       }
     }
 
-    console.log(`Processed: ${withCoords.length} with coords, ${missingCoords.length} without coords`);
+    console.log(`Processed: ${withCoords.length} with coords (regex), ${missingCoords.length} without coords`);
+
+    // Second pass: Enhanced extraction for tweets without coordinates
+    if (useEnhancedExtraction && needsEnhancement.length > 0) {
+      console.log(`\n🚀 Starting enhanced location extraction for ${needsEnhancement.length} tweets...`);
+
+      try {
+        const LocationExtractor = require('./locationExtractor');
+        const GeocodingService = require('./geocodingService');
+
+        const locationExtractor = new LocationExtractor();
+        const geocoder = new GeocodingService();
+
+        if (locationExtractor.enabled) {
+          // Extract location names with Gemini
+          const locationNames = await locationExtractor.extractLocations(needsEnhancement);
+
+          // Geocode location names to coordinates
+          const geocodedCoords = await geocoder.geocodeBatch(locationNames);
+
+          // Update tweets with found coordinates
+          let enhancedCount = 0;
+          for (let i = needsEnhancement.length - 1; i >= 0; i--) {
+            if (geocodedCoords[i]) {
+              const tweet = needsEnhancement[i];
+              withCoords.push({
+                ...tweet,
+                coordinates: geocodedCoords[i],
+                extractedLocation: locationNames[i]
+              });
+
+              // Remove from missingCoords
+              const idx = missingCoords.findIndex(t => t.id === tweet.id);
+              if (idx !== -1) {
+                missingCoords.splice(idx, 1);
+              }
+
+              enhancedCount++;
+            }
+          }
+
+          console.log(`\n✨ Enhanced extraction found ${enhancedCount} additional coordinates!`);
+          console.log(`📊 Final: ${withCoords.length} with coords, ${missingCoords.length} without coords`);
+        }
+      } catch (error) {
+        console.error('Error during enhanced extraction:', error.message);
+        console.log('Continuing with regex-only results...');
+      }
+    }
 
     return { withCoords, missingCoords };
   }

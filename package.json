@@ -7,16 +7,24 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "fetch": "node scripts/fetchTweets.js",
-    "reprocess": "node scripts/reprocessData.js"
+    "reprocess": "node scripts/reprocessData.js",
+    "enhance": "node scripts/enhanceLocations.js"
   },
-  "keywords": ["bangalore", "footpath", "map", "twitter"],
+  "keywords": [
+    "bangalore",
+    "footpath",
+    "map",
+    "twitter"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
     "express": "^4.18.2",
-    "twitter-api-v2": "^1.15.2",
-    "dotenv": "^16.3.1",
     "node-cron": "^3.0.3",
-    "cors": "^2.8.5"
+    "pg": "^8.18.0",
+    "twitter-api-v2": "^1.15.2"
   }
 }
