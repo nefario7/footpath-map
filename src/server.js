@@ -3,6 +3,7 @@ const cors = require('cors');
 const cron = require('node-cron');
 const path = require('path');
 const TwitterService = require('./twitterService');
+const IssueProcessor = require('./issueProcessor'); // New Service
 const db = require('./db');
 require('dotenv').config();
 
@@ -21,40 +22,44 @@ app.use(express.static('public')); // Fallback for old assets if any
 
 
 /**
- * Fetch and update tweets data
+ * Job 1: Ingestion (Fetch Tweets -> DB)
  */
-async function updateTweetsData() {
+async function runIngestion() {
   try {
-    console.log('🔄 Updating tweets data...');
-
-    // Initialize DB if needed (failsafe)
+    console.log('📥 Starting Ingestion Job...');
     await db.initDB();
-
     const twitterService = new TwitterService();
 
     // Get latest ID to fetch only new tweets
     const sinceId = await db.getLatestTweetId();
-    console.log(`   Latest tweet ID in DB: ${sinceId || 'None (Initial fetch)'}`);
+    console.log(`   Latest tweet ID: ${sinceId || 'None'}`);
 
     const tweetsData = await twitterService.fetchRecentTweets(sinceId);
 
     if (tweetsData.tweets.length === 0) {
-      console.log('No new tweets to process.');
-      return await db.getAllPosts();
+      console.log('   No new tweets found.');
+      return;
     }
 
     const processedData = await twitterService.processTweets(tweetsData);
+    const savedCount = await db.savePosts(processedData);
 
-    // Save to DB
-    const allPosts = [...processedData.withCoords, ...processedData.missingCoords];
-    const savedCount = await db.savePosts(allPosts);
-
-    console.log(`✅ Saved ${savedCount} new/updated posts to database`);
-
-    return await db.getAllPosts();
+    console.log(`✅ Ingestion Complete: Saved ${savedCount} posts.`);
   } catch (error) {
-    console.error('❌ Error updating tweets:', error.message);
-    throw error;
+    console.error('❌ Ingestion Error:', error.message);
+  }
+}
+
+/**
+ * Job 2: Processing (Pending Tweets -> AI -> Map)
+ */
+async function runProcessing() {
+  try {
+    // console.log('⚙️  Starting Processing Job...');
+    const processor = new IssueProcessor();
+    await processor.processQueue();
+  } catch (error) {
+    console.error('❌ Processing Error:', error.message);
   }
 }
 
@@ -68,7 +73,7 @@ app.get('/api/locations', async (req, res) => {
   try {
     const locations = await db.getLocations();
     res.json({
-      lastUpdated: new Date(), // Real-time
+      lastUpdated: new Date(),
       count: locations.length,
       locations: locations
     });
@@ -80,7 +85,7 @@ app.get('/api/locations', async (req, res) => {
 
 /**
  * GET /api/posts
- * Returns all posts (with and without coordinates)
+ * Returns all posts
  */
 app.get('/api/posts', async (req, res) => {
   try {
@@ -96,36 +101,34 @@ app.get('/api/posts', async (req, res) => {
 });
 
 /**
- * POST /api/refresh
- * Manually trigger data refresh
+ * POST /api/refresh (Ingestion Trigger)
  */
 app.post('/api/refresh', async (req, res) => {
   try {
-    await updateTweetsData();
-    const data = await db.getAllPosts();
+    await runIngestion();
+    // Optionally trigger processing immediately after ingestion
+    runProcessing();
 
-    res.json({
-      success: true,
-      message: 'Data refreshed successfully',
-      data: {
-        lastUpdated: new Date(),
-        totalPosts: data.totalPosts,
-        postsWithCoords: data.postsWithCoords,
-        postsMissingCoords: data.postsMissingCoords
-      }
-    });
+    res.json({ success: true, message: 'Ingestion triggered' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: 'Failed to refresh data',
-      message: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/process (Processing Trigger)
+ */
+app.post('/api/process', async (req, res) => {
+  try {
+    await runProcessing();
+    res.json({ success: true, message: 'Processing triggered' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 /**
  * GET /api/status
- * Returns server status and last update time
  */
 app.get('/api/status', async (req, res) => {
   try {
@@ -142,18 +145,21 @@ app.get('/api/status', async (req, res) => {
   }
 });
 
-// Schedule automatic updates every 2 days at 2 AM
+// --- Schedulers ---
+
+// 1. Ingestion: Every 2 days at 2 AM (or more frequent if API allowance permits)
 cron.schedule('0 2 */2 * *', async () => {
-  console.log('⏰ Scheduled tweet fetch started');
-  try {
-    await updateTweetsData();
-  } catch (error) {
-    console.error('Scheduled update failed:', error);
-  }
+  await runIngestion();
 });
 
-// The "catchall" handler: for any request that doesn't
-// match one above, send back React's index.html file.
+// 2. Processing: Every 15 minutes
+// Checks for pending posts and processes them
+cron.schedule('*/15 * * * *', async () => {
+  await runProcessing();
+});
+
+
+// The "catchall" handler
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
 });
@@ -161,14 +167,13 @@ app.get('*', (req, res) => {
 // Start server
 const startServer = async () => {
   try {
-    // Initialize DB connection
     await db.initDB();
-
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📍 Map view: http://localhost:${PORT}`);
-      console.log(`📋 Posts list: http://localhost:${PORT}/posts.html`);
     });
+
+    // Initial run on startup (optional, good for dev)
+    // runProcessing(); 
   } catch (error) {
     console.error('Fatal error starting server:', error);
   }

@@ -24,9 +24,27 @@ async function initDB() {
         text TEXT,
         created_at TIMESTAMP,
         media_urls JSONB,
+        processing_status VARCHAR(50) DEFAULT 'pending',
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+        // Check if processing_status column exists (migration for existing db)
+        const checkStatusCol = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='posts' AND column_name='processing_status';
+    `);
+
+        if (checkStatusCol.rows.length === 0) {
+            console.log('🔄 Adding processing_status column to posts table...');
+            await client.query(`ALTER TABLE posts ADD COLUMN processing_status VARCHAR(50) DEFAULT 'pending';`);
+            // Mark existing posts as processed if they are already in locations table
+            await client.query(`
+                UPDATE posts SET processing_status = 'processed' 
+                WHERE id IN (SELECT post_id FROM locations);
+            `);
+        }
 
         // 2. Create locations table (Processed Data)
         await client.query(`
@@ -42,7 +60,6 @@ async function initDB() {
     `);
 
         // 3. Migration: Move existing coordinates from posts to locations
-        // Check if 'coordinates' column exists in posts (legacy schema)
         const checkColumn = await client.query(`
         SELECT column_name 
         FROM information_schema.columns 
@@ -51,8 +68,6 @@ async function initDB() {
 
         if (checkColumn.rows.length > 0) {
             console.log('🔄 Migrating legacy coordinates to locations table...');
-
-            // Move data
             await client.query(`
         INSERT INTO locations (post_id, coordinates, extracted_location, updated_at)
         SELECT id, coordinates, extracted_location, updated_at
@@ -60,14 +75,11 @@ async function initDB() {
         WHERE coordinates IS NOT NULL
         ON CONFLICT (post_id) DO NOTHING;
       `);
-
-            // Drop legacy columns
             await client.query(`
         ALTER TABLE posts 
         DROP COLUMN IF EXISTS coordinates,
         DROP COLUMN IF EXISTS extracted_location;
       `);
-
             console.log('✅ Migration complete: Legacy columns dropped.');
         }
 
@@ -94,10 +106,11 @@ async function savePosts(posts) {
         await client.query('BEGIN');
 
         for (const post of posts) {
-            // Save Raw Post
+            // Save Raw Post - Insert or Update
+            // We do NOT overwrite processing_status on conflict unless implementation requires it
             const query = `
-        INSERT INTO posts (id, text, created_at, media_urls, updated_at)
-        VALUES ($1, $2, $3, $4, NOW())
+        INSERT INTO posts (id, text, created_at, media_urls, processing_status, updated_at)
+        VALUES ($1, $2, $3, $4, 'pending', NOW())
         ON CONFLICT (id) DO UPDATE SET
           media_urls = EXCLUDED.media_urls,
           updated_at = NOW();
@@ -113,7 +126,8 @@ async function savePosts(posts) {
             await client.query(query, values);
             insertedCount++;
 
-            // If post has coordinates, save to locations table too
+            // Legacy support: If post object has explicit coordinates (e.g. from manual entry or legacy code)
+            // we save them, but ideally IssueProcessor handles this now.
             if (post.coordinates) {
                 await saveLocationInternal(client, post.id, post.coordinates, post.extractedLocation);
             }
@@ -146,7 +160,7 @@ async function saveLocationInternal(client, postId, coordinates, extractedLocati
 }
 
 /**
- * Save computed locations (e.g. from enhancement script)
+ * Save computed locations (e.g. from IssueProcessor)
  */
 async function saveLocations(locationItems) {
     const client = await pool.connect();
@@ -163,6 +177,30 @@ async function saveLocations(locationItems) {
     } finally {
         client.release();
     }
+}
+
+/**
+ * Get posts that need processing (pending status)
+ */
+async function getPendingPosts(limit = 10) {
+    const res = await pool.query(`
+        SELECT * FROM posts 
+        WHERE processing_status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT $1
+    `, [limit]);
+    return res.rows.map(formatPost);
+}
+
+/**
+ * Mark a post as processed
+ */
+async function markPostAsProcessed(postId, status = 'processed') {
+    await pool.query(`
+        UPDATE posts 
+        SET processing_status = $1, updated_at = NOW() 
+        WHERE id = $2
+    `, [status, postId]);
 }
 
 /**
@@ -235,5 +273,7 @@ module.exports = {
     saveLocations,
     getLocations,
     getAllPosts,
-    getLatestTweetId
+    getLatestTweetId,
+    getPendingPosts,
+    markPostAsProcessed
 };
