@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
+const path = require('path');
 const TwitterService = require('./twitterService');
 const db = require('./db');
 require('dotenv').config();
@@ -13,7 +14,11 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || '*'
 }));
 app.use(express.json());
-app.use(express.static('public'));
+
+// Serve static files from the React app
+app.use(express.static(path.join(__dirname, '../frontend/dist')));
+app.use(express.static('public')); // Fallback for old assets if any
+
 
 /**
  * Fetch and update tweets data
@@ -145,6 +150,12 @@ cron.schedule('0 2 */2 * *', async () => {
   } catch (error) {
     console.error('Scheduled update failed:', error);
   }
+});
+
+// The "catchall" handler: for any request that doesn't
+// match one above, send back React's index.html file.
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
 });
 
 // Start server

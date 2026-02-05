@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "build": "cd frontend && npm install && npm run build",
     "fetch": "node scripts/fetchTweets.js",
     "reprocess": "node scripts/reprocessData.js",
     "enhance": "node scripts/enhanceLocations.js"
