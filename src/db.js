@@ -17,19 +17,59 @@ async function initDB() {
     try {
         console.log('🔌 Connecting to PostgreSQL...');
 
-        // Create posts table if it doesn't exist
-        // We use JSONB for flexible storage of coordinates and media
+        // 1. Create posts table (Raw Data)
         await client.query(`
       CREATE TABLE IF NOT EXISTS posts (
         id VARCHAR(255) PRIMARY KEY,
         text TEXT,
         created_at TIMESTAMP,
         media_urls JSONB,
-        coordinates JSONB,
-        extracted_location TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+        // 2. Create locations table (Processed Data)
+        await client.query(`
+      CREATE TABLE IF NOT EXISTS locations (
+        id SERIAL PRIMARY KEY,
+        post_id VARCHAR(255) UNIQUE REFERENCES posts(id) ON DELETE CASCADE,
+        coordinates JSONB NOT NULL,
+        extracted_location TEXT,
+        status VARCHAR(50) DEFAULT 'verified',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+        // 3. Migration: Move existing coordinates from posts to locations
+        // Check if 'coordinates' column exists in posts (legacy schema)
+        const checkColumn = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='posts' AND column_name='coordinates';
+    `);
+
+        if (checkColumn.rows.length > 0) {
+            console.log('🔄 Migrating legacy coordinates to locations table...');
+
+            // Move data
+            await client.query(`
+        INSERT INTO locations (post_id, coordinates, extracted_location, updated_at)
+        SELECT id, coordinates, extracted_location, updated_at
+        FROM posts
+        WHERE coordinates IS NOT NULL
+        ON CONFLICT (post_id) DO NOTHING;
+      `);
+
+            // Drop legacy columns
+            await client.query(`
+        ALTER TABLE posts 
+        DROP COLUMN IF EXISTS coordinates,
+        DROP COLUMN IF EXISTS extracted_location;
+      `);
+
+            console.log('✅ Migration complete: Legacy columns dropped.');
+        }
 
         console.log('✅ Database schema initialized');
     } catch (error) {
@@ -41,7 +81,7 @@ async function initDB() {
 }
 
 /**
- * Save posts to database (upsert)
+ * Save raw posts to database (upsert)
  * @param {Array} posts - Array of post objects
  */
 async function savePosts(posts) {
@@ -54,27 +94,29 @@ async function savePosts(posts) {
         await client.query('BEGIN');
 
         for (const post of posts) {
+            // Save Raw Post
             const query = `
-        INSERT INTO posts (id, text, created_at, media_urls, coordinates, extracted_location, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        INSERT INTO posts (id, text, created_at, media_urls, updated_at)
+        VALUES ($1, $2, $3, $4, NOW())
         ON CONFLICT (id) DO UPDATE SET
-          coordinates = EXCLUDED.coordinates,
-          extracted_location = EXCLUDED.extracted_location,
-          updated_at = NOW()
-        WHERE posts.coordinates IS NULL AND EXCLUDED.coordinates IS NOT NULL;
+          media_urls = EXCLUDED.media_urls,
+          updated_at = NOW();
       `;
 
             const values = [
                 post.id,
                 post.text,
                 post.createdAt || post.created_at,
-                JSON.stringify(post.mediaUrls || []),
-                post.coordinates ? JSON.stringify(post.coordinates) : null,
-                post.extractedLocation || null
+                JSON.stringify(post.mediaUrls || [])
             ];
 
-            const res = await client.query(query, values);
-            if (res.rowCount > 0) insertedCount++;
+            await client.query(query, values);
+            insertedCount++;
+
+            // If post has coordinates, save to locations table too
+            if (post.coordinates) {
+                await saveLocationInternal(client, post.id, post.coordinates, post.extractedLocation);
+            }
         }
 
         await client.query('COMMIT');
@@ -89,22 +131,64 @@ async function savePosts(posts) {
 }
 
 /**
- * Get all locations with coordinates
+ * Internal helper to save location
+ */
+async function saveLocationInternal(client, postId, coordinates, extractedLocation) {
+    const query = `
+    INSERT INTO locations (post_id, coordinates, extracted_location, updated_at)
+    VALUES ($1, $2, $3, NOW())
+    ON CONFLICT (post_id) DO UPDATE SET
+      coordinates = EXCLUDED.coordinates,
+      extracted_location = EXCLUDED.extracted_location,
+      updated_at = NOW();
+  `;
+    await client.query(query, [postId, JSON.stringify(coordinates), extractedLocation || null]);
+}
+
+/**
+ * Save computed locations (e.g. from enhancement script)
+ */
+async function saveLocations(locationItems) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        for (const item of locationItems) {
+            await saveLocationInternal(client, item.id, item.coordinates, item.extractedLocation);
+        }
+        await client.query('COMMIT');
+        return locationItems.length;
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Get all processed locations (joined with posts)
  */
 async function getLocations() {
     const res = await pool.query(`
-    SELECT * FROM posts 
-    WHERE coordinates IS NOT NULL
-    ORDER BY created_at DESC
+    SELECT p.*, l.coordinates, l.extracted_location, l.status
+    FROM locations l
+    JOIN posts p ON l.post_id = p.id
+    ORDER BY p.created_at DESC
   `);
     return res.rows.map(formatPost);
 }
 
 /**
- * Get all posts with stats
+ * Get all posts (raw + location info if available)
  */
 async function getAllPosts() {
-    const res = await pool.query('SELECT * FROM posts ORDER BY created_at DESC');
+    // Left join to get all posts, even those without locations
+    const res = await pool.query(`
+        SELECT p.*, l.coordinates, l.extracted_location, l.status
+        FROM posts p
+        LEFT JOIN locations l ON p.id = l.post_id
+        ORDER BY p.created_at DESC
+    `);
 
     const posts = res.rows.map(formatPost);
     const withCoords = posts.filter(p => p.coordinates);
@@ -148,6 +232,7 @@ module.exports = {
     pool,
     initDB,
     savePosts,
+    saveLocations,
     getLocations,
     getAllPosts,
     getLatestTweetId
