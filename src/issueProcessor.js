@@ -19,12 +19,12 @@ class IssueProcessor {
         }
 
         this.isProcessing = true;
-        console.log('⚙️  Starting Issue Processing Cycle...');
+        console.log('⚙️  Starting Batch Issue Processing...');
 
         try {
             // 1. Get pending posts
-            // Process in small batches (2) to respect rate limits and allow delays
-            const pendingPosts = await db.getPendingPosts(2);
+            // Fetch 10 at a time for batch AI processing
+            const pendingPosts = await db.getPendingPosts(10);
 
             if (pendingPosts.length === 0) {
                 // console.log('✅ No pending posts to process.');
@@ -34,70 +34,59 @@ class IssueProcessor {
 
             console.log(`   Found ${pendingPosts.length} pending posts.`);
 
-            for (const post of pendingPosts) {
-                await this.processPost(post);
-                // Wait 5 seconds between items to respect API limits (15 RPM)
-                await new Promise(r => setTimeout(r, 5000));
+            // 2. Batch Analyze with AI
+            const analyzedPosts = await this.aiService.analyzeBatch(pendingPosts);
+
+            // 3. Process results sequentially to throttle Geocoding
+            for (const post of analyzedPosts) {
+                await this.finalizePost(post);
             }
 
         } catch (error) {
             console.error('❌ Error in Issue Processor:', error);
         } finally {
             this.isProcessing = false;
-            console.log('🏁 Issue Processing Cycle Complete.');
+            console.log('🏁 Batch Cycle Complete.');
         }
     }
 
     /**
-     * Process a single post
+     * Finalize a post after AI analysis (Geocode & Save)
      */
-    async processPost(post) {
-        try {
-            console.log(`   Processing Post ID: ${post.id}`);
+    async finalizePost(post) {
+        const analysis = post.aiAnalysis;
+        let locationSaved = false;
 
-            // 1. Analyze with AI
-            const analysis = await this.aiService.analyzeTweet(post.text);
+        // If it's an issue and has location
+        if (analysis && analysis.isIssue && analysis.location) {
+            console.log(`     🤖 AI Issue: "${analysis.location}" (ID: ${post.id})`);
 
-            let locationSaved = false;
+            // Geocode
+            const coords = await this.geocoder.geocode(analysis.location);
 
-            // 2. If it's an issue and has location
-            if (analysis.isIssue && analysis.location) {
-                console.log(`     🤖 AI identified location: "${analysis.location}"`);
+            if (coords) {
+                console.log(`     📍 Geocoded: ${coords.lat}, ${coords.lon}`);
 
-                // 3. Geocode
-                const coords = await this.geocoder.geocode(analysis.location);
+                await db.saveLocations([{
+                    id: post.id,
+                    coordinates: coords,
+                    extractedLocation: analysis.location
+                }]);
 
-                if (coords) {
-                    console.log(`     📍 Geocoded: ${coords.lat}, ${coords.lon}`);
+                locationSaved = true;
 
-                    // 4. Save to locations
-                    await db.saveLocations([{
-                        id: post.id,
-                        coordinates: coords,
-                        extractedLocation: analysis.location
-                    }]);
+                // Throttling: Wait 1.1s after a geocode request to respect Nominatim limits
+                await new Promise(r => setTimeout(r, 1100));
 
-                    locationSaved = true;
-                } else {
-                    console.log(`     ⚠️ Geocoding failed for: "${analysis.location}"`);
-                }
             } else {
-                // Check for pre-existing coordinates (e.g. from regex in ingestion if we kept that logic, 
-                // or if we want to trust the "coordinates" field on the post object if we passed it along)
-                // For now, we rely solely on AI analysis or explicit legacy handling if needed.
-
-                // If the post ALREADY had coordinates (legacy), they are likely already in locations table 
-                // due to the migration handling.
+                console.log(`     ⚠️ Geocoding failed.`);
             }
-
-            // 5. Mark as processed regardless of outcome (so we don't retry forever)
-            // We might want a 'failed' status if something technical went wrong, but for "no issue found", 'processed' is correct.
-            await db.markPostAsProcessed(post.id, locationSaved ? 'processed_mapped' : 'processed_no_issue');
-
-        } catch (error) {
-            console.error(`     ❌ Error processing post ${post.id}:`, error.message);
-            // Optional: Mark as 'error' to retry later? Or just skip.
+        } else {
+            // No issue or no location, just skip quietly
         }
+
+        // Mark as processed
+        await db.markPostAsProcessed(post.id, locationSaved ? 'processed_mapped' : 'processed_no_issue');
     }
 }
 
