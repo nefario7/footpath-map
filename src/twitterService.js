@@ -54,21 +54,72 @@ class TwitterService {
 
   /**
    * Parse coordinates from tweet text
-   * Format: "Coords: 12.944583, 77.620572"
+   * Supports multiple formats:
+   * - "Coords: 12.944583, 77.620572"
+   * - "12.944583, 77.620572" (plain coordinates)
+   * - "12.944583°N, 77.620572°E"
+   * - Google Maps URLs
    */
   parseCoordinates(text) {
-    const coordRegex = /Coords?:\s*([\d.]+),\s*([\d.]+)/i;
-    const match = text.match(coordRegex);
+    let lat = null;
+    let lon = null;
+    
+    // Pattern 1: "Coords:" or "Coord:" prefix (case insensitive)
+    const coordPrefixRegex = /Coords?:\s*([\d.]+)\s*,\s*([\d.]+)/i;
+    let match = text.match(coordPrefixRegex);
     
     if (match) {
-      const lat = parseFloat(match[1]);
-      const lon = parseFloat(match[2]);
-      
-      // Validate coordinates are within Bangalore bounds (approximately)
-      // Bangalore: lat 12.8-13.2, lon 77.4-77.8
-      if (lat >= 12.7 && lat <= 13.3 && lon >= 77.3 && lon <= 77.9) {
-        return { lat, lon };
+      lat = parseFloat(match[1]);
+      lon = parseFloat(match[2]);
+    }
+    
+    // Pattern 2: Google Maps URLs
+    // Format: maps.google.com/?q=12.944583,77.620572 or google.com/maps/place/@12.944583,77.620572
+    if (!lat) {
+      const googleMapsRegex = /(?:maps\.google\.com\/\?q=|google\.com\/maps\/place\/@|maps\.app\.goo\.gl\/|@)([\d.]+)\s*,\s*([\d.]+)/i;
+      match = text.match(googleMapsRegex);
+      if (match) {
+        lat = parseFloat(match[1]);
+        lon = parseFloat(match[2]);
       }
+    }
+    
+    // Pattern 3: Coordinates with degree symbols
+    // Format: 12.944583°N, 77.620572°E or 12.944583°, 77.620572°
+    if (!lat) {
+      const degreeRegex = /([\d.]+)°\s*[NS]?\s*,\s*([\d.]+)°\s*[EW]?/i;
+      match = text.match(degreeRegex);
+      if (match) {
+        lat = parseFloat(match[1]);
+        lon = parseFloat(match[2]);
+      }
+    }
+    
+    // Pattern 4: Plain coordinates (two decimal numbers separated by comma)
+    // Be more strict to avoid false positives - must have reasonable precision
+    if (!lat) {
+      const plainRegex = /\b(1[2-3]\.\d{4,})\s*,\s*(7[6-7]\.\d{4,})\b/;
+      match = text.match(plainRegex);
+      if (match) {
+        lat = parseFloat(match[1]);
+        lon = parseFloat(match[2]);
+      }
+    }
+    
+    // Pattern 5: Location pin emoji followed by coordinates
+    if (!lat) {
+      const pinRegex = /📍\s*([\d.]+)\s*,\s*([\d.]+)/;
+      match = text.match(pinRegex);
+      if (match) {
+        lat = parseFloat(match[1]);
+        lon = parseFloat(match[2]);
+      }
+    }
+    
+    // Validate coordinates are within Bangalore bounds (approximately)
+    // Bangalore: lat 12.7-13.3, lon 77.3-77.9
+    if (lat && lon && lat >= 12.7 && lat <= 13.3 && lon >= 77.3 && lon <= 77.9) {
+      return { lat, lon };
     }
     
     return null;

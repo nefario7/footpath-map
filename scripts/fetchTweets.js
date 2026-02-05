@@ -4,7 +4,7 @@ const path = require('path');
 
 async function fetchAndSaveTweets() {
   try {
-    console.log('Starting tweet fetch...');
+    console.log('Starting tweet fetch from Twitter API...');
     
     const twitterService = new TwitterService();
     
@@ -20,7 +20,7 @@ async function fetchAndSaveTweets() {
       fs.mkdirSync(dataDir, { recursive: true });
     }
     
-    // Save to JSON file
+    // Save to posts.json
     const dataPath = path.join(dataDir, 'posts.json');
     const dataToSave = {
       lastUpdated: new Date().toISOString(),

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "fetch": "node scripts/fetchTweets.js"
+    "fetch": "node scripts/fetchTweets.js",
+    "reprocess": "node scripts/reprocessData.js"
   },
   "keywords": ["bangalore", "footpath", "map", "twitter"],
   "author": "",
