@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Map as MapIcon, List, RefreshCw } from 'lucide-react';
+import { Map as MapIcon, List, RefreshCw, Search, Filter } from 'lucide-react';
 import Map from './components/Map';
 import PostList from './components/PostList';
 
@@ -11,6 +11,10 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState({ total: 0, mapped: 0 });
+
+  // Filters
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterHasCoords, setFilterHasCoords] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -48,6 +52,14 @@ function App() {
       setLoading(false);
     }
   };
+
+  const filteredPosts = useMemo(() => {
+    return posts.filter(post => {
+      const matchesSearch = post.text.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesCoords = filterHasCoords ? post.coordinates : true;
+      return matchesSearch && matchesCoords;
+    });
+  }, [posts, searchQuery, filterHasCoords]);
 
   return (
     <div className="flex flex-col h-screen bg-gray-50 text-gray-900 font-sans">
@@ -108,10 +120,35 @@ function App() {
 
         {/* List Container */}
         <div className={`w-full sm:w-1/3 h-full bg-white border-l border-gray-200 flex flex-col ${activeTab === 'map' ? 'hidden sm:flex' : 'flex'}`}>
-          <div className="p-4 border-b border-gray-100 bg-white flex justify-between items-center">
-            <h2 className="font-semibold text-gray-800">Recent Updates</h2>
+          <div className="p-4 border-b border-gray-100 bg-white space-y-3">
+            <div className="flex justify-between items-center">
+              <h2 className="font-semibold text-gray-800">Recent Updates</h2>
+              <span className="text-xs text-gray-400">{filteredPosts.length} posts</span>
+            </div>
+
+            {/* Search & Filter Controls */}
             <div className="flex gap-2">
-              {/* Filters could go here */}
+              <div className="relative flex-1">
+                <Search className="absolute left-2.5 top-2.5 text-gray-400" size={14} />
+                <input
+                  type="text"
+                  placeholder="Search posts..."
+                  className="w-full pl-8 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+              <button
+                onClick={() => setFilterHasCoords(!filterHasCoords)}
+                className={`px-3 py-2 rounded-md border text-sm flex items-center gap-1 transition-colors ${filterHasCoords
+                    ? 'bg-blue-50 border-blue-200 text-blue-700'
+                    : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
+                title="Filter mapped posts"
+              >
+                <Filter size={14} />
+                <span className="hidden xl:inline">Mapped</span>
+              </button>
             </div>
           </div>
 
@@ -119,7 +156,7 @@ function App() {
             {error ? (
               <div className="p-8 text-center text-red-500">{error}</div>
             ) : (
-              <PostList posts={posts} />
+              <PostList posts={filteredPosts} />
             )}
           </div>
         </div>
