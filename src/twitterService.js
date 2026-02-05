@@ -156,20 +156,25 @@ class TwitterService {
   }
 
   /**
-   * Process tweets and categorize by coordinate availability
-   * Can optionally use enhanced extraction with LLM + Geocoding
+   * Process tweets with AI pipeline
    */
-  async processTweets(tweetsData, useEnhancedExtraction = false) {
+  async processTweets(tweetsData, useEnhancedExtraction = true) {
     const { tweets, includes } = tweetsData;
     const withCoords = [];
     const missingCoords = [];
 
-    // First pass: Use regex patterns
-    const needsEnhancement = [];
+    // Initialize Services
+    const AiAnalysisService = require('./aiAnalysisService');
+    const GeocodingService = require('./geocodingService');
+    const aiService = new AiAnalysisService();
+    const geocoder = new GeocodingService();
+
+    console.log(`\n🔄 Processing ${tweets.length} tweets...`);
 
     for (const tweet of tweets) {
-      const coords = this.parseCoordinates(tweet.text);
+      // Basic extraction
       const mediaUrls = this.getMediaUrls(tweet, includes);
+      const preParsedCoords = this.parseCoordinates(tweet.text);
 
       const processedTweet = {
         id: tweet.id,
@@ -179,70 +184,48 @@ class TwitterService {
         mediaUrls: mediaUrls
       };
 
-      if (coords) {
+      // 1. If explicit coordinates exist, use them
+      if (preParsedCoords) {
         withCoords.push({
           ...processedTweet,
-          coordinates: { ...coords, source: 'regex' }
+          coordinates: { ...preParsedCoords, source: 'explicit' }
         });
-      } else {
-        missingCoords.push(processedTweet);
-        // Only add to enhancement queue if not marked to skip
-        if (!tweet.skipProcessing) {
-          needsEnhancement.push(processedTweet);
-        }
+        continue;
       }
-    }
 
-    console.log(`Processed: ${withCoords.length} with coords (regex), ${missingCoords.length} without coords`);
+      // 2. AI Analysis Pipeline (for tweets without coords)
+      if (useEnhancedExtraction && aiService.enabled && !tweet.skipProcessing) {
+        const analysis = await aiService.analyzeTweet(tweet.text);
 
-    // Second pass: Enhanced extraction for tweets without coordinates
-    if (useEnhancedExtraction && needsEnhancement.length > 0) {
-      console.log(`\n🚀 Starting enhanced location extraction for ${needsEnhancement.length} tweets...`);
+        if (analysis.isIssue && analysis.location) {
+          console.log(`   🤖 AI Verified Issue: "${analysis.location}" (Conf: ${analysis.confidence})`);
 
-      try {
-        const LocationExtractor = require('./locationExtractor');
-        const GeocodingService = require('./geocodingService');
+          // 3. Geocode the extracted location
+          const geoResult = await geocoder.geocode(analysis.location);
 
-        const locationExtractor = new LocationExtractor();
-        const geocoder = new GeocodingService();
-
-        if (locationExtractor.enabled) {
-          // Extract location names with Gemini
-          const locationNames = await locationExtractor.extractLocations(needsEnhancement);
-
-          // Geocode location names to coordinates
-          const geocodedCoords = await geocoder.geocodeBatch(locationNames);
-
-          // Update tweets with found coordinates
-          let enhancedCount = 0;
-          for (let i = needsEnhancement.length - 1; i >= 0; i--) {
-            if (geocodedCoords[i]) {
-              const tweet = needsEnhancement[i];
-              withCoords.push({
-                ...tweet,
-                coordinates: geocodedCoords[i],
-                extractedLocation: locationNames[i]
-              });
-
-              // Remove from missingCoords
-              const idx = missingCoords.findIndex(t => t.id === tweet.id);
-              if (idx !== -1) {
-                missingCoords.splice(idx, 1);
-              }
-
-              enhancedCount++;
-            }
+          if (geoResult) {
+            withCoords.push({
+              ...processedTweet,
+              coordinates: geoResult,
+              extractedLocation: analysis.location,
+              status: 'verified' // AI verified
+            });
+            continue;
+          } else {
+            console.log(`     ⚠️ Geocoding failed for: "${analysis.location}"`);
           }
-
-          console.log(`\n✨ Enhanced extraction found ${enhancedCount} additional coordinates!`);
-          console.log(`📊 Final: ${withCoords.length} with coords, ${missingCoords.length} without coords`);
+        } else if (analysis.isIssue) {
+          // It is an issue but no location found
+          // console.log(`   ℹ️  Issue detected but no location: ${tweet.text.substring(0, 30)}...`);
+          processedTweet.isIssue = true;
         }
-      } catch (error) {
-        console.error('Error during enhanced extraction:', error.message);
-        console.log('Continuing with regex-only results...');
       }
+
+      // If we fall through to here, we don't have coordinates
+      missingCoords.push(processedTweet);
     }
 
+    console.log(`✅ Final: ${withCoords.length} mapped, ${missingCoords.length} unmapped.`);
     return { withCoords, missingCoords };
   }
 }
